@@ -212,14 +212,10 @@ const UI = (() => {
     }
 
     function renderStatusBar(stats) {
-        sel('sb-dl').textContent = '\u2193 ' + fmt.speed(stats.downloadSpeed);
-        sel('sb-ul').textContent = '\u2191 ' + fmt.speed(stats.uploadSpeed);
+        sel('sb-dl').textContent     = '\u2193 ' + fmt.speed(stats.downloadSpeed);
+        sel('sb-ul').textContent     = '\u2191 ' + fmt.speed(stats.uploadSpeed);
         sel('sb-active').textContent = stats.total + ' torrent' + (stats.total !== 1 ? 's' : '');
-
-        const dht = window.__wt_client;
-        if (dht && typeof dht.dhtNodes === 'number') {
-            sel('sb-dht').textContent = 'DHT: ' + dht.dhtNodes + ' nodes';
-        }
+        sel('sb-dht').textContent    = 'DHT: ' + (stats.dhtNodes || 0) + ' nodes';
     }
 
     function renderDetailPanel() {

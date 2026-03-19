@@ -5,6 +5,16 @@
     let refreshTimer = null;
     let currentSettings = { ...cfg };
 
+    try {
+        Engine.init(cfg);
+    } catch (err) {
+        document.body.innerHTML = '<div style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#0f0f11;color:#e05252;font-family:sans-serif;font-size:14px;text-align:center;padding:40px">' +
+            '<div><strong>wTorrent failed to initialise.</strong><br><br>' +
+            'The WebTorrent library could not be loaded. Check your internet connection and reload the page.<br><br>' +
+            '<small style="color:#666">' + (err.message || err) + '</small></div></div>';
+        return;
+    }
+
     function startRefresh() {
         if (refreshTimer) clearInterval(refreshTimer);
         const interval = Math.max(500, currentSettings.refreshInterval || 1500);
@@ -20,15 +30,19 @@
 
     async function onAdd(source, opts = {}) {
         try {
-            const paused = opts.paused || (currentSettings.startPaused && opts.paused === undefined ? true : !!opts.paused);
-            const torrent = await Engine.add(source, { paused });
+            const paused = opts.paused !== undefined ? !!opts.paused : !!currentSettings.startPaused;
+            let src = source;
+            if (source instanceof File) {
+                src = new Uint8Array(await source.arrayBuffer());
+            }
+            const torrent = await Engine.add(src, { paused });
             await API.saveTorrent({
                 infoHash:   torrent.infoHash,
                 magnetURI:  torrent.magnetURI,
                 name:       torrent.name || torrent.infoHash,
                 size:       torrent.length || 0,
                 addedAt:    Date.now(),
-                userPaused: !!paused,
+                userPaused: paused,
             });
             tick();
         } catch (err) {
@@ -81,7 +95,7 @@
             const patch = UI.collectSettingsFromForm();
             try {
                 await API.saveSettings(patch);
-                currentSettings = { ...currentSettings, ...{
+                currentSettings = Object.assign({}, currentSettings, {
                     maxDlSpeed:      patch.max_dl_speed,
                     maxUlSpeed:      patch.max_ul_speed,
                     maxConnections:  patch.max_connections,
@@ -90,7 +104,7 @@
                     enableLsd:       patch.enable_lsd,
                     startPaused:     patch.start_paused,
                     refreshInterval: patch.refresh_interval,
-                }};
+                });
                 Engine.applySpeedLimits(patch.max_dl_speed, patch.max_ul_speed);
                 startRefresh();
                 UI.closeModal('modal-settings');
@@ -111,8 +125,6 @@
         try { await API.logout(); } catch (_) {}
         window.location.href = '/login.php';
     }
-
-    Engine.init(cfg);
 
     try {
         const saved = await API.getTorrents();

@@ -22,6 +22,13 @@ const Engine = (() => {
         });
     }
 
+    function _extractHash(source) {
+        if (typeof source !== 'string') return null;
+        if (/^[a-fA-F0-9]{40}$/.test(source)) return source.toLowerCase();
+        const m = source.match(/xt=urn:btih:([a-fA-F0-9]{40})(?:[&\s]|$)/i);
+        return m ? m[1].toLowerCase() : null;
+    }
+
     function add(source, options = {}) {
         return new Promise((resolve, reject) => {
             if (!client) return reject(new Error('Engine not initialized.'));
@@ -29,59 +36,64 @@ const Engine = (() => {
             const existing = _findBySource(source);
             if (existing) return resolve(existing);
 
-            let settled = false;
+            const prelimHash = _extractHash(source);
+            if (prelimHash && !meta.has(prelimHash)) {
+                meta.set(prelimHash, {
+                    infoHash:   prelimHash,
+                    magnetURI:  typeof source === 'string' ? source : '',
+                    name:       '',
+                    size:       0,
+                    addedAt:    options.addedAt || Date.now(),
+                    userPaused: !!options.paused,
+                    lastError:  null,
+                });
+            }
 
-            const onError = err => {
-                if (!settled) { settled = true; reject(err); }
-            };
+            let settled = false;
 
             client.add(source, {}, torrent => {
                 if (settled) return;
                 settled = true;
-                client.removeListener('error', onError);
 
-                const entry = {
+                const prev = meta.get(torrent.infoHash) || {};
+                meta.set(torrent.infoHash, {
                     infoHash:   torrent.infoHash,
                     magnetURI:  torrent.magnetURI,
                     name:       torrent.name,
                     size:       torrent.length,
-                    addedAt:    options.addedAt || Date.now(),
-                    userPaused: !!options.paused,
-                };
-
-                meta.set(torrent.infoHash, entry);
-
-                if (options.paused) torrent.pause();
-
-                torrent.on('done', () => {
-                    const m = meta.get(torrent.infoHash);
-                    if (m && !m.userPaused) m.status = 'seeding';
+                    addedAt:    prev.addedAt || options.addedAt || Date.now(),
+                    userPaused: prev.userPaused !== undefined ? prev.userPaused : !!options.paused,
+                    lastError:  prev.lastError || null,
                 });
+
+                if (prev.userPaused || options.paused) torrent.pause();
 
                 torrent.on('error', err => {
                     const m = meta.get(torrent.infoHash);
-                    if (m) { m.lastError = err.message; }
+                    if (m) m.lastError = err.message;
                 });
 
                 resolve(torrent);
             });
 
-            client.once('error', onError);
+            client.on('error', function onClientError(err) {
+                if (settled) return;
+                settled = true;
+                client.removeListener('error', onClientError);
+                if (prelimHash) meta.delete(prelimHash);
+                reject(err);
+            });
         });
     }
 
     function _findBySource(source) {
-        if (!client) return null;
-        const s = typeof source === 'string' ? source : null;
-        if (!s) return null;
-        return client.torrents.find(t => t.infoHash === s || t.magnetURI === s) || null;
+        if (!client || typeof source !== 'string') return null;
+        return client.torrents.find(t => t.infoHash === source || t.magnetURI === source) || null;
     }
 
     function remove(infoHash, destroyStore) {
         const torrent = client ? client.get(infoHash) : null;
-        if (torrent) {
-            torrent.destroy({ destroyStore: !!destroyStore });
-        }
+        if (torrent) torrent.destroy({ destroyStore: !!destroyStore });
         meta.delete(infoHash);
     }
 
@@ -100,11 +112,11 @@ const Engine = (() => {
     }
 
     function _statusOf(torrent, m) {
-        if (!torrent) return m ? (m.lastError ? 'errored' : 'queued') : 'unknown';
+        if (!torrent) return m ? (m.lastError ? 'errored' : 'checking') : 'unknown';
         if (m && m.userPaused) return 'paused';
-        if (m && m.lastError) return 'errored';
-        if (!torrent.ready) return 'checking';
-        if (torrent.done) return 'seeding';
+        if (m && m.lastError)  return 'errored';
+        if (!torrent.ready)    return 'checking';
+        if (torrent.done)      return 'seeding';
         if (torrent.downloadSpeed > 0 || torrent.uploadSpeed > 0) return 'downloading';
         return 'inactive';
     }
@@ -123,7 +135,7 @@ const Engine = (() => {
             result.push({
                 infoHash,
                 name:          t ? (t.name || m.name || infoHash.slice(0, 8)) : (m.name || infoHash.slice(0, 8)),
-                size:          t ? t.length : m.size || 0,
+                size:          t ? t.length : (m.size || 0),
                 downloaded:    t ? t.downloaded : 0,
                 uploaded:      t ? t.uploaded : 0,
                 downloadSpeed: t ? t.downloadSpeed : 0,
@@ -146,8 +158,8 @@ const Engine = (() => {
                 })) : [],
                 wires: t ? t.wires.map(w => ({
                     address:       w.remoteAddress || '—',
-                    downloadSpeed: typeof w.downloadSpeed === 'function' ? w.downloadSpeed() : 0,
-                    uploadSpeed:   typeof w.uploadSpeed === 'function' ? w.uploadSpeed() : 0,
+                    downloadSpeed: typeof w.downloadSpeed === 'function' ? w.downloadSpeed() : (w.downloadSpeed || 0),
+                    uploadSpeed:   typeof w.uploadSpeed   === 'function' ? w.uploadSpeed()   : (w.uploadSpeed   || 0),
                     protocol:      w.type || 'WebRTC',
                 })) : [],
                 announce: t ? (t.announce || []) : [],
@@ -157,12 +169,20 @@ const Engine = (() => {
     }
 
     function getGlobalStats() {
+        let totalDl = 0, totalUl = 0;
+        if (client) {
+            for (const t of client.torrents) {
+                totalDl += t.downloaded || 0;
+                totalUl += t.uploaded   || 0;
+            }
+        }
         return {
-            downloadSpeed: client ? client.downloadSpeed : 0,
-            uploadSpeed:   client ? client.uploadSpeed   : 0,
-            progress:      client ? client.progress      : 0,
-            ratio:         client ? client.ratio         : 0,
+            downloadSpeed: client ? (client.downloadSpeed || 0) : 0,
+            uploadSpeed:   client ? (client.uploadSpeed   || 0) : 0,
+            progress:      client ? (client.progress      || 0) : 0,
+            ratio:         totalDl > 0 ? totalUl / totalDl : 0,
             total:         meta.size,
+            dhtNodes:      (client && client.dht && Array.isArray(client.dht.nodes)) ? client.dht.nodes.length : 0,
         };
     }
 
@@ -174,7 +194,7 @@ const Engine = (() => {
         f.getBlobURL((err, url) => {
             if (err) { console.error('[wTorrent download]', err); return; }
             const a = document.createElement('a');
-            a.href = url;
+            a.href     = url;
             a.download = f.name;
             document.body.appendChild(a);
             a.click();
@@ -196,8 +216,12 @@ const Engine = (() => {
 
     function applySpeedLimits(dlKbps, ulKbps) {
         if (!client) return;
-        client.throttleDownload(dlKbps > 0 ? dlKbps * 1024 : -1);
-        client.throttleUpload(ulKbps > 0 ? ulKbps * 1024 : -1);
+        const dl = dlKbps > 0 ? dlKbps * 1024 : -1;
+        const ul = ulKbps > 0 ? ulKbps * 1024 : -1;
+        for (const t of client.torrents) {
+            if (typeof t.throttleDownload === 'function') t.throttleDownload(dl);
+            if (typeof t.throttleUpload   === 'function') t.throttleUpload(ul);
+        }
     }
 
     function destroy() {
