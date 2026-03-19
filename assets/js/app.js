@@ -8,10 +8,12 @@
     try {
         Engine.init(cfg);
     } catch (err) {
-        document.body.innerHTML = '<div style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#0f0f11;color:#e05252;font-family:sans-serif;font-size:14px;text-align:center;padding:40px">' +
-            '<div><strong>wTorrent failed to initialise.</strong><br><br>' +
-            'The WebTorrent library could not be loaded. Check your internet connection and reload the page.<br><br>' +
-            '<small style="color:#666">' + (err.message || err) + '</small></div></div>';
+        document.body.innerHTML =
+            '<div style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;' +
+            'background:#0f0f11;color:#e05252;font-family:sans-serif;font-size:14px;text-align:center;padding:40px">' +
+            '<div><strong>wTorrent could not initialise.</strong><br><br>' +
+            'The WebTorrent library failed to load. Check your internet connection and reload the page.<br><br>' +
+            '<small style="color:#555">' + (err && err.message ? err.message : String(err)) + '</small></div></div>';
         return;
     }
 
@@ -36,6 +38,7 @@
                 src = new Uint8Array(await source.arrayBuffer());
             }
             const torrent = await Engine.add(src, { paused });
+            tick();
             await API.saveTorrent({
                 infoHash:   torrent.infoHash,
                 magnetURI:  torrent.magnetURI,
@@ -44,28 +47,27 @@
                 addedAt:    Date.now(),
                 userPaused: paused,
             });
-            tick();
         } catch (err) {
-            console.error('[wTorrent] add failed', err);
+            console.error('[wTorrent] add failed:', err);
         }
     }
 
     async function onRemove(infoHash, destroyStore) {
         Engine.remove(infoHash, destroyStore);
-        try { await API.removeTorrent(infoHash); } catch (_) {}
         tick();
+        try { await API.removeTorrent(infoHash); } catch (_) {}
     }
 
     async function onPause(infoHash) {
         Engine.pause(infoHash);
-        try { await API.updatePaused(infoHash, true); } catch (_) {}
         tick();
+        try { await API.updatePaused(infoHash, true); } catch (_) {}
     }
 
     async function onResume(infoHash) {
         Engine.resume(infoHash);
-        try { await API.updatePaused(infoHash, false); } catch (_) {}
         tick();
+        try { await API.updatePaused(infoHash, false); } catch (_) {}
     }
 
     async function onSettings(action) {
@@ -95,7 +97,7 @@
             const patch = UI.collectSettingsFromForm();
             try {
                 await API.saveSettings(patch);
-                currentSettings = Object.assign({}, currentSettings, {
+                Object.assign(currentSettings, {
                     maxDlSpeed:      patch.max_dl_speed,
                     maxUlSpeed:      patch.max_ul_speed,
                     maxConnections:  patch.max_connections,
@@ -109,7 +111,7 @@
                 startRefresh();
                 UI.closeModal('modal-settings');
             } catch (err) {
-                console.error('[wTorrent] save settings failed', err);
+                console.error('[wTorrent] save settings failed:', err);
             }
             return;
         }
@@ -126,9 +128,13 @@
         window.location.href = '/login.php';
     }
 
+    UI.init(onAdd, onRemove, onPause, onResume, onSettings, onLogout);
+    tick();
+    startRefresh();
+
     try {
         const saved = await API.getTorrents();
-        if (Array.isArray(saved)) {
+        if (Array.isArray(saved) && saved.length > 0) {
             for (const entry of saved) {
                 if (entry.magnetURI) {
                     Engine.add(entry.magnetURI, {
@@ -138,9 +144,9 @@
                 }
             }
         }
-    } catch (_) {}
-
-    UI.init(onAdd, onRemove, onPause, onResume, onSettings, onLogout);
-    tick();
-    startRefresh();
-})();
+    } catch (err) {
+        console.error('[wTorrent] failed to load saved torrents:', err);
+    }
+})().catch(err => {
+    console.error('[wTorrent] fatal boot error:', err);
+});
